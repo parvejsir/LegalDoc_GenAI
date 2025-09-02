@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from datetime import date
 
 class LegalDocSummary(BaseModel):
     category: str = Field(..., description="Category/type of the legal document (e.g., summons, contract, agreement, notice).")
@@ -18,3 +19,6 @@ class SummaryRequest(BaseModel):
 class SummaryResponse(BaseModel):
     summary: LegalDocSummary
     is_summarized: bool
+
+class LastDateResponse(BaseModel):
+    last_date: Optional[date] = Field(..., description="The last date to take action mentioned in the document.")

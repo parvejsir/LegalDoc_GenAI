@@ -3,9 +3,10 @@
 import os
 import uuid
 import shutil
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,13 +22,17 @@ if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY environment variable not found. Please set it in your .env file.")
 
 # Now, import your modules that rely on the key
-from summarizer import generate_document_summary
-from models import SummaryResponse, LegalDocSummary
+from summarizer import generate_document_summary, extract_last_date
+from models import SummaryResponse, LegalDocSummary, LastDateResponse
 from utils import extract_text_from_pdf
 from modules.chunking import file_to_chunks
 from modules.embedding_store import build_faiss_from_chunks, INDEX_DIR
 from modules.retriever import answer_query
 from modules.chatbot import init_chat, add_user_message, add_bot_message
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global state for the application
 db_session: Dict[str, dict] = {}
@@ -54,9 +59,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/upload-and-build/")
 async def upload_and_build_db(file: UploadFile = File(...)):
-    """
-    Handles file upload, chunks the document, and builds the FAISS index.
-    """
+    # ... (no change, existing code for RAG) ...
     global db_session
     
     filepath = Path("data") / file.filename
@@ -90,9 +93,7 @@ async def upload_and_build_db(file: UploadFile = File(...)):
 
 @app.post("/chat/")
 async def chat_with_docs(request: ChatRequest):
-    """
-    Handles the chat query, retrieves relevant context, and gets an answer.
-    """
+    # ... (no change, existing code for RAG) ...
     conversation_id = request.conversation_id
     query = request.query
     
@@ -118,13 +119,44 @@ async def chat_with_docs(request: ChatRequest):
         "chat_history": session_data["chat_history"]
     }
 
-# --- Summarizer Endpoint ---
+# --- Summarizer Endpoints ---
 
 @app.post("/summarize/", response_model=SummaryResponse)
 async def summarize_document(file: UploadFile = File(...), language: str = Form(...)):
+    # ... (no change, existing code for summarization) ...
+    file_location = f"temp/{file.filename}"
+    Path(file_location).parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        document_content = extract_text_from_pdf(file_location)
+        if not document_content:
+            raise HTTPException(status_code=400, detail="Could not extract text from the document.")
+
+        summary_result: LegalDocSummary = generate_document_summary(document_content, language, GOOGLE_API_KEY)
+        
+        logger.info("--- Document Summary ---")
+        logger.info(summary_result.model_dump_json(indent=2))
+        
+        return SummaryResponse(
+            summary=summary_result,
+            is_summarized=False
+        )
+    except Exception as e:
+        logger.error(f"An internal error occurred: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+    finally:
+        if os.path.exists(file_location):
+            os.remove(file_location)
+
+
+# --- New Endpoint for Date Extraction ---
+@app.post("/extract-last-date/", response_model=LastDateResponse)
+async def extract_date_from_document(file: UploadFile = File(...)):
     """
-    Handles document summarization request.
-    This endpoint always generates a new summary on each call.
+    Extracts the last date from a legal document.
     """
     file_location = f"temp/{file.filename}"
     Path(file_location).parent.mkdir(parents=True, exist_ok=True)
@@ -137,17 +169,13 @@ async def summarize_document(file: UploadFile = File(...), language: str = Form(
         if not document_content:
             raise HTTPException(status_code=400, detail="Could not extract text from the document.")
 
-        # Pass the API key explicitly to the summarization function
-        summary_result: LegalDocSummary = generate_document_summary(document_content, language, GOOGLE_API_KEY)
-        print(type(summary_result.json))
-        return SummaryResponse(
-            summary=summary_result,
-            is_summarized=False # Always return false as we are not using a cache
-        )
+        last_date = extract_last_date(document_content, GOOGLE_API_KEY)
+        
+        return LastDateResponse(last_date=last_date)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+        logger.error(f"An error occurred during date extraction: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred during date extraction.")
     finally:
-        # Ensure temporary file is always cleaned up
         if os.path.exists(file_location):
             os.remove(file_location)
 
