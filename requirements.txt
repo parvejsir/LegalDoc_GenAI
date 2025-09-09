@@ -20,7 +20,6 @@ fastapi
 uvicorn
 python-multipart
 pydantic
-transformers
 tiktoken
 PyMuPDF
 pinecone
